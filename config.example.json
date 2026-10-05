@@ -1,0 +1,15 @@
+{
+  "virustotal_api_key": "",
+  "hybrid_analysis_api_key": "",
+  "metadefender_api_key": "",
+  "google_api_key": "",
+  "secondary_engine": "hybrid_analysis",
+  "free_tier": true,
+  "request_delay_seconds": 15,
+  "vt_auto_upload": true,
+  "vt_sandbox": true,
+  "vt_analysis_timeout_seconds": 90,
+  "google_model": "gemini-3.7-flash",
+  "report_format": "both",
+  "open_report": true
+}
