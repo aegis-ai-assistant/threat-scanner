@@ -166,8 +166,8 @@ python3 test_apis.py
 1. Accept a folder or archive (CLI path or GUI picker).
 2. Extract archives to a unique temp directory.
 3. Collect matching payload files and compute SHA-256.
-4. Query VirusTotal v3 `/api/v3/files/{hash}`. If the hash is unknown and `vt_auto_upload` is on, upload the sample, wait for analysis, then pull sandbox behaviour.
-5. Query Hybrid Analysis (form-encoded `hash=`) and/or MetaDefender.
+4. Alternate the first hash lookup between VirusTotal and Hybrid Analysis. A conclusive clean or malicious result stops there. A hash miss asks the other engine. Upload to VirusTotal only when every configured engine reports the hash as unknown and `vt_auto_upload` is on.
+5. An authentication failure, rate limit, server error, or network error is an incomplete lookup. It is not a clean result and it does not trigger an upload. MetaDefender still runs when it is configured and neither primary engine was conclusive.
 6. If `google_api_key` is set, synthesize a short defensive note for each threat.
 7. Drop clean/undetected hashes from the report.
 8. Write the Aegis HTML/RTF report for remaining threats.

@@ -15,6 +15,12 @@ from aegis.constants import (
     VT_MAX_UPLOAD_BYTES,
 )
 from aegis.intel import FileIntel, VendorFinding
+from aegis.intel.outcome import (
+    ENGINE_VIRUSTOTAL,
+    STATUS_API_ERROR,
+    EngineResult,
+    classify_virustotal,
+)
 from aegis.intel.transport import LookupInterrupted, incomplete_response, network_failure
 from aegis.rate_limit import RateLimiter
 
@@ -27,7 +33,22 @@ def _headers(api_key: str) -> dict[str, str]:
     return {"x-apikey": api_key, **_VT_HEADERS_ACCEPT}
 
 
-def query_virustotal(sha256: str, api_key: str, limiter: RateLimiter, log) -> FileIntel:
+def query_virustotal(sha256: str, api_key: str, limiter: RateLimiter, log) -> EngineResult:
+    """Look up one hash. HTTP 404 is an unknown hash; auth, rate-limit, and server failures are API errors."""
+    try:
+        intel = _fetch_virustotal_report(sha256, api_key, limiter, log)
+    except LookupInterrupted as exc:
+        message = str(exc)
+        log(f"  VirusTotal: {message}")
+        intel = FileIntel(sha256=sha256, vt_error=message)
+        return EngineResult(ENGINE_VIRUSTOTAL, STATUS_API_ERROR, intel, message)
+    status = classify_virustotal(intel)
+    if status == STATUS_API_ERROR and intel.vt_error:
+        log(f"  VirusTotal: {intel.vt_error}")
+    return EngineResult(ENGINE_VIRUSTOTAL, status, intel, intel.vt_error or "")
+
+
+def _fetch_virustotal_report(sha256: str, api_key: str, limiter: RateLimiter, log) -> FileIntel:
     limiter.wait(log)
     response = _get_file(sha256, api_key)
 
@@ -195,7 +216,7 @@ def _wait_for_analysis(
 
 def _refresh_file_report(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> FileIntel:
     limiter.wait(log)
-    refreshed = query_virustotal(intel.sha256, api_key, RateLimiter(0, enabled=False), log)
+    refreshed = query_virustotal(intel.sha256, api_key, RateLimiter(0, enabled=False), log).intel
     refreshed.vt_uploaded = intel.vt_uploaded
     refreshed.vt_upload_error = intel.vt_upload_error
     if refreshed.vt_found:

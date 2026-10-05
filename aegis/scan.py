@@ -273,14 +273,21 @@ def _scan_payloads(
             continue
         log(f"  SHA-256: {sha}")
         saved = checkpoint.files.get(sha)
-        if saved is not None and not saved.intel.vt_error:
+        if saved is not None and not saved.intel.service_error:
             log("  Already checked before the interruption — skipping lookups.")
             intel = saved.intel
             _set_file_issue(checkpoint, payload.internal_path, None)
             checkpoint.save()
         else:
             try:
-                intel = lookup_hash(sha, config, limiter, log, file_path=payload.full_path)
+                intel = lookup_hash(
+                    sha,
+                    config,
+                    limiter,
+                    log,
+                    file_path=payload.full_path,
+                    file_index=index - 1,
+                )
             except LookupInterrupted as exc:
                 checkpoint.stopped_reason = str(exc)
                 checkpoint.phase = PHASE_SCANNING
@@ -292,19 +299,19 @@ def _scan_payloads(
                     checkpoint.payload_count,
                 ) from exc
             checkpoint.remember_file(payload, intel)
-            _set_file_issue(checkpoint, payload.internal_path, intel.vt_error)
+            _set_file_issue(checkpoint, payload.internal_path, intel.service_error)
             checkpoint.save()
             saved = checkpoint.files[sha]
             intel = saved.intel
-        if intel.vt_error:
-            log(f"  Incomplete: {intel.vt_error}")
+        if intel.service_error:
+            log(f"  Incomplete: {intel.service_error}")
         if intel.is_threat:
             threats.append(ThreatRecord(payload, intel))
             log(
                 f"  THREAT: {intel.threat_level} "
                 f"({intel.malicious} malicious / {intel.suspicious} suspicious)"
             )
-        elif not intel.vt_error:
+        elif not intel.service_error:
             log("  Clean/undetected — omitted from report.")
         tracker.end_file()
 

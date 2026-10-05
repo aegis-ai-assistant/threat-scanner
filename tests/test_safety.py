@@ -16,7 +16,7 @@ from aegis.checkpoint import clear_checkpoint, set_checkpoint_path
 from aegis.config import AppConfig, load_config
 from aegis.intel import FileIntel
 from aegis.intel.hybrid import query_hybrid_analysis
-from aegis.intel.transport import LookupInterrupted
+from aegis.intel.outcome import STATUS_API_ERROR
 from aegis.intel.virustotal import (
     _parse_behaviour_summary,
     _wait_for_analysis,
@@ -72,7 +72,8 @@ class UploadAndVerdictTests(unittest.TestCase):
             patch("aegis.intel.virustotal.requests.get", lambda *a, **k: Response()),
             patch("aegis.intel.virustotal.requests.post", fake_post),
         ):
-            intel = query_virustotal("a" * 64, "key", limiter, lambda _line: None)
+            result = query_virustotal("a" * 64, "key", limiter, lambda _line: None)
+            intel = result.intel
             enrich_virustotal(
                 intel,
                 Path("sample.exe"),
@@ -83,6 +84,7 @@ class UploadAndVerdictTests(unittest.TestCase):
                 sandbox=True,
                 analysis_timeout=1,
             )
+        self.assertEqual(result.status, STATUS_API_ERROR)
         self.assertEqual(posts, [])
         self.assertIn("401", intel.vt_error or "")
         self.assertFalse(intel.vt_uploaded)
@@ -161,9 +163,10 @@ class UploadAndVerdictTests(unittest.TestCase):
 
         intel = FileIntel(sha256="d" * 64)
         with patch("aegis.intel.hybrid.requests.Session", Session):
-            with self.assertRaises(LookupInterrupted) as caught:
-                query_hybrid_analysis(intel, "key", RateLimiter(0, enabled=False), lambda _line: None)
-        self.assertIn("401", str(caught.exception))
+            result = query_hybrid_analysis(intel, "key", RateLimiter(0, enabled=False), lambda _line: None)
+        self.assertEqual(result.status, STATUS_API_ERROR)
+        self.assertIn("401", result.detail)
+        self.assertIsNone(intel.hybrid_verdict)
 
     def test_upload_defaults_to_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,7 +311,7 @@ class IncompleteScanTests(unittest.TestCase):
         (folder / "a.exe").write_bytes(b"alpha")
         logs: list[str] = []
 
-        def fake_lookup(sha, config, limiter, log, file_path=None):
+        def fake_lookup(sha, config, limiter, log, file_path=None, file_index=0):
             return FileIntel(sha256=sha, vt_error="VirusTotal authentication failed (HTTP 401)")
 
         with (

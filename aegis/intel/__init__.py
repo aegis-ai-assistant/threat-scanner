@@ -62,6 +62,16 @@ class FileIntel:
         return False
 
     @property
+    def service_error(self) -> str | None:
+        """API failures for this file. A hash miss is not an error."""
+        parts = [
+            text
+            for text in (self.vt_error, self.hybrid_error, self.metadefender_error)
+            if text
+        ]
+        return "; ".join(parts) or None
+
+    @property
     def threat_level(self) -> str:
         if self.malicious >= 20:
             return "CRITICAL"

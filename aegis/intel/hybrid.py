@@ -16,13 +16,28 @@ import requests
 
 from aegis.constants import HYBRID_OVERVIEW, HYBRID_SEARCH_HASH, HYBRID_USER_AGENT
 from aegis.intel import FileIntel
-from aegis.intel.transport import incomplete_response, network_failure
+from aegis.intel.outcome import ENGINE_HYBRID, EngineResult, classify_hybrid
+from aegis.intel.transport import LookupInterrupted, incomplete_response, network_failure
 from aegis.rate_limit import RateLimiter
 
 NOT_FOUND_MESSAGE = "[Hybrid Analysis: Hash not found in database]"
 
 
-def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> None:
+def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> EngineResult:
+    """Look up one hash. A database miss is unknown; auth, rate-limit, and server failures are API errors."""
+    try:
+        _fill_hybrid(intel, api_key, limiter, log)
+    except LookupInterrupted as exc:
+        message = str(exc)
+        intel.hybrid_error = message
+        log(f"  Hybrid Analysis: {message}")
+        return EngineResult(ENGINE_HYBRID, classify_hybrid(intel), intel, message)
+    status = classify_hybrid(intel)
+    detail = intel.hybrid_error or intel.hybrid_verdict or ""
+    return EngineResult(ENGINE_HYBRID, status, intel, detail)
+
+
+def _fill_hybrid(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> None:
     sha256_hash = (intel.sha256 or "").strip().lower()
     if not sha256_hash:
         log(f"  {NOT_FOUND_MESSAGE}")
@@ -50,9 +65,8 @@ def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, 
 
     try:
         payload = response.json()
-    except ValueError:
-        log(f"  {NOT_FOUND_MESSAGE}")
-        return
+    except ValueError as exc:
+        raise LookupInterrupted("Hybrid Analysis returned non-JSON.") from exc
 
     reports = _extract_reports(payload)
     if not reports:
@@ -64,7 +78,8 @@ def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, 
         log(f"  {NOT_FOUND_MESSAGE}")
         return
 
-    intel.hybrid_verdict = str(best.get("verdict") or best.get("threat_level_human") or "unknown")
+    verdict = best.get("verdict") or best.get("threat_level_human")
+    intel.hybrid_verdict = str(verdict) if verdict not in (None, "") else "no specific threat"
     score = best.get("threat_score")
     if score is not None:
         try:
