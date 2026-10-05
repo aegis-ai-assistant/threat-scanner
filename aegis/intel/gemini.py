@@ -36,12 +36,20 @@ Section mapping:
 """
 
 
-def synthesize_threats(threats: list, api_key: str, model: str, limiter: RateLimiter, log) -> None:
+def synthesize_threats(
+    threats: list,
+    api_key: str,
+    model: str,
+    limiter: RateLimiter,
+    log,
+    on_record=None,
+) -> None:
     if not threats:
         return
     resolved = model or GEMINI_PRIMARY_MODEL
     log(f"Synthesizing {len(threats)} threat note(s) with Google AI ({resolved})...")
     for record in threats:
+        record.intel.ai_error = None
         try:
             raw = generate_text(
                 api_key,
@@ -53,12 +61,18 @@ def synthesize_threats(threats: list, api_key: str, model: str, limiter: RateLim
             )
             if raw:
                 apply_synthesis(record.intel, raw)
-                log(f"  Google AI synthesis ready for {record.payload.display_name}")
+                if record.intel.ai_summary_ready:
+                    record.intel.ai_error = None
+                    log(f"  Google AI synthesis ready for {record.payload.display_name}")
+                elif not record.intel.ai_error:
+                    record.intel.ai_error = "model response did not include a summary"
             elif not record.intel.ai_error:
                 record.intel.ai_error = "empty model response"
         except Exception as exc:
             record.intel.ai_error = str(exc)
             log(f"  Google AI error for {record.payload.display_name}: {exc}")
+        if on_record is not None:
+            on_record(record)
 
 
 def apply_synthesis(intel: FileIntel, raw: str) -> None:

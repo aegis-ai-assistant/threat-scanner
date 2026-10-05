@@ -16,6 +16,7 @@ import requests
 
 from aegis.constants import HYBRID_OVERVIEW, HYBRID_SEARCH_HASH, HYBRID_USER_AGENT
 from aegis.intel import FileIntel
+from aegis.intel.transport import incomplete_response, network_failure
 from aegis.rate_limit import RateLimiter
 
 NOT_FOUND_MESSAGE = "[Hybrid Analysis: Hash not found in database]"
@@ -31,9 +32,7 @@ def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, 
     try:
         response = search_hash(api_key, sha256_hash)
     except requests.RequestException as exc:
-        intel.hybrid_error = f"request failed: {exc}"
-        log(f"  Hybrid Analysis error: {intel.hybrid_error}")
-        return
+        raise network_failure("Hybrid Analysis", exc) from exc
 
     if response.status_code == 429:
         log("  Hybrid Analysis rate-limited (HTTP 429). Waiting and retrying once...")
@@ -41,21 +40,13 @@ def query_hybrid_analysis(intel: FileIntel, api_key: str, limiter: RateLimiter, 
         try:
             response = search_hash(api_key, sha256_hash)
         except requests.RequestException as exc:
-            intel.hybrid_error = f"retry failed: {exc}"
-            log(f"  Hybrid Analysis error: {intel.hybrid_error}")
-            return
+            raise network_failure("Hybrid Analysis", exc) from exc
 
     if _is_not_found(response):
         log(f"  {NOT_FOUND_MESSAGE}")
         return
-    if response.status_code == 401:
-        intel.hybrid_error = "API key rejected (HTTP 401)"
-        log(f"  Hybrid Analysis error: {intel.hybrid_error}")
-        return
     if response.status_code >= 400:
-        intel.hybrid_error = f"HTTP {response.status_code}"
-        log(f"  Hybrid Analysis error: HTTP {response.status_code}")
-        return
+        raise incomplete_response("Hybrid Analysis", response)
 
     try:
         payload = response.json()
@@ -119,22 +110,20 @@ def search_hash(api_key: str, sha256_hash: str, timeout: float = 45) -> requests
             timeout=timeout,
         )
     if response.status_code == 400:
-        overview = session.get(
+        # Return the overview status itself. A 401 or 500 here used to be
+        # discarded, and the earlier HTTP 400 was then treated as "not found".
+        return session.get(
             f"{HYBRID_OVERVIEW}{sha256_hash}",
             headers=headers,
             timeout=timeout,
         )
-        if overview.status_code in {200, 404}:
-            return overview
     return response
 
 
 def _is_not_found(response: requests.Response) -> bool:
     if response.status_code in {204, 404}:
         return True
-    if response.status_code == 400:
-        return True
-    if not (response.content or b"").strip():
+    if response.status_code == 200 and not (response.content or b"").strip():
         return True
     return False
 

@@ -15,9 +15,12 @@ from aegis.constants import (
     VT_MAX_UPLOAD_BYTES,
 )
 from aegis.intel import FileIntel, VendorFinding
+from aegis.intel.transport import LookupInterrupted, incomplete_response, network_failure
 from aegis.rate_limit import RateLimiter
 
 _VT_HEADERS_ACCEPT = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+_ANALYSIS_POLL_SECONDS = 2
+_SANDBOX_RANK = {"malicious": 2, "suspicious": 1}
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -35,17 +38,21 @@ def query_virustotal(sha256: str, api_key: str, limiter: RateLimiter, log) -> Fi
 
     if response.status_code == 404:
         return _empty(sha256, found=False)
-    if response.status_code == 401:
-        raise RuntimeError("VirusTotal API key was rejected (HTTP 401). Check config.json.")
+    if response.status_code in {401, 403}:
+        intel = _empty(sha256, found=False)
+        intel.vt_error = f"VirusTotal authentication failed (HTTP {response.status_code})"
+        return intel
     if response.status_code >= 400:
-        snippet = response.text[:240].replace("\n", " ")
-        raise RuntimeError(f"VirusTotal HTTP {response.status_code}: {snippet}")
+        raise incomplete_response("VirusTotal", response)
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise RuntimeError("VirusTotal returned non-JSON.") from exc
-    return parse_virustotal(sha256, payload)
+        raise LookupInterrupted("VirusTotal returned non-JSON.") from exc
+    try:
+        return parse_virustotal(sha256, payload)
+    except (TypeError, ValueError) as exc:
+        raise LookupInterrupted(f"VirusTotal returned an unexpected report: {exc}") from exc
 
 
 def enrich_virustotal(
@@ -60,6 +67,9 @@ def enrich_virustotal(
     analysis_timeout: float,
 ) -> FileIntel:
     """If the hash is unknown, upload the file and optionally pull sandbox data."""
+    if intel.vt_error:
+        log(f"  VirusTotal upload skipped: {intel.vt_error}")
+        return intel
     if not intel.vt_found and auto_upload and file_path is not None:
         intel = _upload_and_refresh(intel, file_path, api_key, limiter, log, analysis_timeout)
     if intel.vt_found and sandbox:
@@ -71,7 +81,7 @@ def _get_file(sha256: str, api_key: str) -> requests.Response:
     try:
         return requests.get(f"{VT_API_FILE}{sha256}", headers=_headers(api_key), timeout=45)
     except requests.RequestException as exc:
-        raise RuntimeError(f"VirusTotal request failed: {exc}") from exc
+        raise network_failure("VirusTotal", exc) from exc
 
 
 def _empty(sha256: str, found: bool) -> FileIntel:
@@ -108,9 +118,7 @@ def _upload_and_refresh(
                 timeout=120,
             )
     except requests.RequestException as exc:
-        intel.vt_upload_error = f"upload failed: {exc}"
-        log(f"  VirusTotal upload error: {intel.vt_upload_error}")
-        return intel
+        raise network_failure("VirusTotal upload", exc) from exc
 
     if response.status_code == 409:
         log("  VirusTotal: sample already known; refreshing hash report...")
@@ -129,22 +137,15 @@ def _upload_and_refresh(
                     timeout=120,
                 )
         except requests.RequestException as exc:
-            intel.vt_upload_error = f"upload retry failed: {exc}"
-            log(f"  VirusTotal upload error: {intel.vt_upload_error}")
-            return intel
+            raise network_failure("VirusTotal upload", exc) from exc
 
     if response.status_code >= 400:
-        snippet = response.text[:240].replace("\n", " ")
-        intel.vt_upload_error = f"HTTP {response.status_code}: {snippet}"
-        log(f"  VirusTotal upload error: {intel.vt_upload_error}")
-        return intel
+        raise incomplete_response("VirusTotal upload", response)
 
     try:
         payload = response.json()
-    except ValueError:
-        intel.vt_upload_error = "upload returned non-JSON"
-        log(f"  VirusTotal upload error: {intel.vt_upload_error}")
-        return intel
+    except ValueError as exc:
+        raise LookupInterrupted("VirusTotal upload returned non-JSON.") from exc
 
     analysis_id = ((payload.get("data") or {}).get("id")) or ""
     intel.vt_uploaded = True
@@ -173,13 +174,11 @@ def _wait_for_analysis(
                 timeout=45,
             )
         except requests.RequestException as exc:
-            log(f"  VirusTotal analysis poll error: {exc}")
-            return
+            raise network_failure("VirusTotal analysis", exc) from exc
         if response.status_code == 404:
             return
         if response.status_code >= 400:
-            log(f"  VirusTotal analysis poll HTTP {response.status_code}")
-            return
+            raise incomplete_response("VirusTotal analysis", response)
         try:
             status = ((response.json().get("data") or {}).get("attributes") or {}).get("status")
         except ValueError:
@@ -189,16 +188,14 @@ def _wait_for_analysis(
             return
         if status not in {"queued", "in-progress", None}:
             return
+        # The free-tier limiter already waits before the next request. This pause
+        # still applies when that limiter is off, so the poll cannot spin.
+        time.sleep(_ANALYSIS_POLL_SECONDS)
 
 
 def _refresh_file_report(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> FileIntel:
     limiter.wait(log)
-    try:
-        refreshed = query_virustotal(intel.sha256, api_key, RateLimiter(0, enabled=False), log)
-    except RuntimeError as exc:
-        intel.vt_error = str(exc)
-        log(f"  VirusTotal refresh error: {exc}")
-        return intel
+    refreshed = query_virustotal(intel.sha256, api_key, RateLimiter(0, enabled=False), log)
     refreshed.vt_uploaded = intel.vt_uploaded
     refreshed.vt_upload_error = intel.vt_upload_error
     if refreshed.vt_found:
@@ -217,14 +214,12 @@ def _attach_sandbox(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -
     try:
         response = requests.get(url, headers=_headers(api_key), timeout=45)
     except requests.RequestException as exc:
-        log(f"  VirusTotal sandbox error: {exc}")
-        return
+        raise network_failure("VirusTotal sandbox", exc) from exc
     if response.status_code == 404:
         log("  VirusTotal sandbox: no behaviour report yet.")
         return
     if response.status_code >= 400:
-        log(f"  VirusTotal sandbox HTTP {response.status_code}")
-        return
+        raise incomplete_response("VirusTotal sandbox", response)
     try:
         payload = response.json()
     except ValueError:
@@ -250,19 +245,20 @@ def _parse_behaviour_summary(intel: FileIntel, payload: dict) -> None:
                 intel.add_label(text)
 
     severity = attributes.get("threat_severity_level") or attributes.get("threat_severity")
+    candidate = ""
     if isinstance(severity, dict):
-        intel.sandbox_verdict = str(severity.get("level") or severity.get("value") or "") or intel.sandbox_verdict
+        candidate = str(severity.get("level") or severity.get("value") or "")
     elif severity:
-        intel.sandbox_verdict = str(severity)
-
+        candidate = str(severity)
     families = attributes.get("malware_families") or attributes.get("families") or []
+    family = ""
     if isinstance(families, list) and families:
         first = families[0]
         if isinstance(first, dict):
-            intel.sandbox_family = str(first.get("value") or first.get("name") or "")
+            family = str(first.get("value") or first.get("name") or "")
         else:
-            intel.sandbox_family = str(first)
-        intel.add_label(intel.sandbox_family)
+            family = str(first)
+    _apply_sandbox(intel, candidate, family)
 
     for technique in (attributes.get("mitre_attack_techniques") or [])[:8]:
         if isinstance(technique, dict):
@@ -356,16 +352,28 @@ def parse_virustotal(sha256: str, payload: dict) -> FileIntel:
         for name, detail in sandbox_verdicts.items():
             if not isinstance(detail, dict):
                 continue
-            category = str(detail.get("category") or "").lower()
-            if category and not intel.sandbox_verdict:
-                intel.sandbox_verdict = category
+            category = str(detail.get("category") or "")
             families = detail.get("malware_classification") or detail.get("malware_names") or []
-            if isinstance(families, list) and families and not intel.sandbox_family:
-                intel.sandbox_family = str(families[0])
-                intel.add_label(intel.sandbox_family)
+            family = str(families[0]) if isinstance(families, list) and families else ""
+            _apply_sandbox(intel, category, family)
             if category:
                 intel.sandbox_behaviors.append(f"{name}: {category}")
     return intel
+
+
+def _apply_sandbox(intel: FileIntel, category: str | None, family: str | None = None) -> None:
+    """Keep the strongest sandbox category. Malicious beats suspicious and anything else."""
+    cand = (category or "").strip()
+    current = (intel.sandbox_verdict or "").strip()
+    cand_rank = _SANDBOX_RANK.get(cand.lower(), 0)
+    current_rank = _SANDBOX_RANK.get(current.lower(), 0)
+    upgraded = bool(cand) and cand_rank > current_rank
+    if cand and (not current or upgraded):
+        intel.sandbox_verdict = cand
+    chosen_family = (family or "").strip()
+    if chosen_family and (upgraded or not intel.sandbox_family):
+        intel.sandbox_family = chosen_family
+        intel.add_label(chosen_family)
 
 
 def _vendor_rank(name: str) -> int:

@@ -6,11 +6,12 @@ import argparse
 import sys
 from pathlib import Path
 
+from aegis.checkpoint import PHASE_AI, clear_checkpoint, load_checkpoint, same_target
 from aegis.config import ConfigError, load_config
 from aegis.constants import APP_NAME, APP_VERSION
 from aegis.context_menu import ContextMenuError, install_context_menu, uninstall_context_menu
 from aegis.paths import open_file
-from aegis.scan import run_scan
+from aegis.scan import ScanPaused, run_scan
 from aegis import winconsole
 
 
@@ -90,11 +91,23 @@ def _run_cli(target: Path) -> int:
     except ConfigError as exc:
         _emit(str(exc), error=True)
         return 2
+    resume = _cli_resume_choice(target)
+    if resume is None:
+        return 0
     try:
-        result = run_scan(target, config, log=print)
+        result = run_scan(target, config, log=print, resume=resume)
+    except ScanPaused as exc:
+        _emit(str(exc), error=True)
+        return 3
     except (FileNotFoundError, RuntimeError, OSError) as exc:
         _emit(str(exc), error=True)
         return 1
+    if result.ai_pending:
+        _emit(
+            "The plain-English summary did not complete. "
+            "Run this scan again and choose to retry it."
+        )
+        return 0
     if result.clean_message:
         return 0
     if config.open_report and result.report_paths:
@@ -103,6 +116,49 @@ def _run_cli(target: Path) -> int:
         except OSError:
             pass
     return 0
+
+
+def _cli_resume_choice(target: Path) -> bool | None:
+    """Return True to continue, False to start over, or None to leave the saved scan alone."""
+    saved = load_checkpoint()
+    if saved is None:
+        return False
+    resolved = target.expanduser()
+    if not same_target(saved.target, resolved):
+        _emit(
+            f"A saved scan of {saved.target} is unfinished.\n"
+            "Restart discards it and scans the path you passed. Continue keeps the saved scan."
+        )
+        answer = _prompt("Restart and scan this target instead? [y/N] ")
+        if answer.lower().startswith("y"):
+            clear_checkpoint()
+            return False
+        _emit("Left the saved scan in place.")
+        return None
+    if saved.phase == PHASE_AI:
+        _emit("File lookups finished. The plain-English summary did not complete.")
+        answer = _prompt("Retry AI summary now? [Y/n] ")
+        if answer.lower().startswith("n"):
+            _emit("Saved scan kept. Start again and use Retry AI summary.")
+            return None
+        return True
+    reason = saved.stopped_reason or "The scan stopped before it finished."
+    total = saved.payload_count or saved.completed_count
+    _emit(f"{reason}\n{saved.completed_count} of {total} file(s) already checked.")
+    answer = _prompt("Continue or Restart? [C/r] ")
+    if answer.lower().startswith("r"):
+        clear_checkpoint()
+        return False
+    return True
+
+
+def _prompt(text: str) -> str:
+    if not sys.stdin or not sys.stdin.isatty():
+        return ""
+    try:
+        return input(text).strip()
+    except EOFError:
+        return ""
 
 
 def _gui_available() -> bool:

@@ -44,16 +44,18 @@ def workspace_dir() -> Path:
 
 
 def prepare_workspace() -> Path:
-    path = workspace_dir()
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Create a fresh directory that no other scan is using.
+
+    A fixed temp path can be replaced with a symlink that survives a delete.
+    mkdtemp only returns a new real directory.
+    """
+    return Path(tempfile.mkdtemp(prefix="aegis_threat_scan_"))
 
 
 def cleanup_workspace(path: Path | None = None) -> None:
-    target = path or workspace_dir()
-    shutil.rmtree(target, ignore_errors=True)
+    if path is None or path.is_symlink() or not path.exists():
+        return
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def desktop_dir() -> Path:

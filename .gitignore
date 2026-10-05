@@ -17,5 +17,6 @@ build_output/
 .vscode/
 *.log
 config.json
+scan_checkpoint.json
 .DS_Store
 Thumbs.db

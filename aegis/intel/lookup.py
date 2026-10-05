@@ -1,4 +1,4 @@
-"""Query VirusTotal first (upload if unknown), then secondary engines, then optional Gemini."""
+"""Query VirusTotal first. A known clean hash stops there; other services run only when needed."""
 
 from __future__ import annotations
 
@@ -12,6 +12,15 @@ from aegis.intel.virustotal import enrich_virustotal, query_virustotal
 from aegis.rate_limit import RateLimiter
 
 
+def known_clean_hash(intel: FileIntel) -> bool:
+    """True when the VirusTotal file report already exists and is not a threat.
+
+    That report is the first hash lookup. Sandbox, Hybrid Analysis, and
+    MetaDefender are separate calls and are not consulted for this decision.
+    """
+    return bool(intel.vt_found) and not intel.is_threat
+
+
 def lookup_hash(
     sha256: str,
     config: AppConfig,
@@ -20,33 +29,36 @@ def lookup_hash(
     file_path: Path | None = None,
 ) -> FileIntel:
     log("  Querying VirusTotal v3...")
-    try:
-        intel = query_virustotal(sha256, config.virustotal_api_key, limiter, log)
-    except RuntimeError as exc:
-        intel = FileIntel(sha256=sha256, vt_found=False, vt_error=str(exc))
-        log(f"  VirusTotal error: {exc}")
+    intel = query_virustotal(sha256, config.virustotal_api_key, limiter, log)
+
+    if known_clean_hash(intel):
+        log(
+            f"  VirusTotal: malicious={intel.malicious} suspicious={intel.suspicious} "
+            f"undetected={intel.undetected} harmless={intel.harmless}"
+        )
+        log("  VirusTotal: hash is known and clean — moving to the next file.")
+        return intel
 
     if intel.vt_found:
         log(
             f"  VirusTotal: malicious={intel.malicious} suspicious={intel.suspicious} "
             f"undetected={intel.undetected} harmless={intel.harmless}"
         )
-    elif not intel.vt_error:
+    elif intel.vt_error:
+        log(f"  VirusTotal: {intel.vt_error}")
+    else:
         log("  VirusTotal: hash not found (no prior analysis).")
 
-    try:
-        intel = enrich_virustotal(
-            intel,
-            file_path,
-            config.virustotal_api_key,
-            limiter,
-            log,
-            auto_upload=config.vt_auto_upload,
-            sandbox=config.vt_sandbox,
-            analysis_timeout=config.vt_analysis_timeout_seconds,
-        )
-    except RuntimeError as exc:
-        log(f"  VirusTotal enrich error: {exc}")
+    intel = enrich_virustotal(
+        intel,
+        file_path,
+        config.virustotal_api_key,
+        limiter,
+        log,
+        auto_upload=config.vt_auto_upload,
+        sandbox=config.vt_sandbox,
+        analysis_timeout=config.vt_analysis_timeout_seconds,
+    )
 
     if config.query_hybrid():
         log("  Querying Hybrid Analysis v2...")

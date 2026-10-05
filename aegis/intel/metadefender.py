@@ -6,6 +6,7 @@ import requests
 
 from aegis.constants import METADEFENDER_HASH, USER_AGENT
 from aegis.intel import FileIntel, VendorFinding
+from aegis.intel.transport import incomplete_response, network_failure
 from aegis.rate_limit import RateLimiter
 
 
@@ -16,16 +17,10 @@ def query_metadefender(intel: FileIntel, api_key: str, limiter: RateLimiter, log
     try:
         response = requests.get(url, headers=headers, timeout=45)
     except requests.RequestException as exc:
-        intel.metadefender_error = f"request failed: {exc}"
-        log(f"  MetaDefender error: {intel.metadefender_error}")
-        return
+        raise network_failure("MetaDefender", exc) from exc
 
     if response.status_code == 404:
         intel.metadefender_result = "not_found"
-        return
-    if response.status_code == 401:
-        intel.metadefender_error = "API key rejected (HTTP 401)"
-        log(f"  MetaDefender error: {intel.metadefender_error}")
         return
     if response.status_code == 429:
         log("  MetaDefender rate-limited (HTTP 429). Waiting and retrying once...")
@@ -33,12 +28,9 @@ def query_metadefender(intel: FileIntel, api_key: str, limiter: RateLimiter, log
         try:
             response = requests.get(url, headers=headers, timeout=45)
         except requests.RequestException as exc:
-            intel.metadefender_error = f"retry failed: {exc}"
-            return
+            raise network_failure("MetaDefender", exc) from exc
     if response.status_code >= 400:
-        intel.metadefender_error = f"HTTP {response.status_code}: {response.text[:200]}"
-        log(f"  MetaDefender error: {intel.metadefender_error}")
-        return
+        raise incomplete_response("MetaDefender", response)
 
     try:
         payload = response.json()

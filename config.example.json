@@ -6,7 +6,7 @@
   "secondary_engine": "hybrid_analysis",
   "free_tier": true,
   "request_delay_seconds": 15,
-  "vt_auto_upload": true,
+  "vt_auto_upload": false,
   "vt_sandbox": true,
   "vt_analysis_timeout_seconds": 90,
   "google_model": "gemini-3.7-flash",

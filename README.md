@@ -67,7 +67,7 @@ Recursive directory walks and uncompressed archives are filtered to these extens
 
 `.exe` `.dll` `.bat` `.cmd` `.ps1` `.vbs` `.js` `.jse` `.wsf` `.hta` `.scr` `.pif` `.msi` `.com` `.reg` `.iso` `.img` `.lnk` `.chm` `.cpl` `.docm` `.xlsm`
 
-Supported input archives: `.zip`, `.rar`, `.7z`, `.tar.gz`. Nested archives are extracted into `%TEMP%\threat_scan_workspace` (never into the original folder).
+Supported input archives: `.zip`, `.rar`, `.7z`, `.tar.gz`. Nested archives are extracted into a unique directory under the system temp folder (never into the original folder).
 
 ## Optional: run from source
 
@@ -91,7 +91,7 @@ Edit `config.json` and add at least a VirusTotal API key.
 | `secondary_engine` | | `hybrid_analysis` (default), `metadefender`, `both`, or `none` |
 | `free_tier` | | `true` enforces a 15-second pause between API calls |
 | `request_delay_seconds` | | Delay used when `free_tier` is true (default `15`) |
-| `vt_auto_upload` | | Upload unknown hashes to VirusTotal (default `true`, 32 MB public limit) |
+| `vt_auto_upload` | | Upload unknown hashes to VirusTotal (default `false`, 32 MB public limit) |
 | `vt_sandbox` | | Pull VirusTotal behaviour/sandbox summary (default `true`) |
 | `vt_analysis_timeout_seconds` | | How long to wait after an upload (default `90`) |
 | `google_model` | | Gemini model id (default `gemini-3.7-flash`, fallback `gemini-3.6-flash`) |
@@ -114,11 +114,11 @@ python threat_scanner.py --uninstall-context-menu
 - A path argument (Explorer context menu or CLI): scan starts immediately.
 - `--cli`: console only; prints the clean confirmation or report path.
 
-If every hashed file is clean or unknown, the tool prints:
+If every hashed file is clean or unknown, and nothing failed, the tool prints:
 
 `Scan Complete: 0 threats detected across X evaluated execution files.`
 
-and does **not** write a report. Threats are written to the Desktop as `Aegis_Threat_Report_YYYYMMDD_HHMMSS.html` and/or `.rtf`.
+and does **not** write a report. Hash failures, skipped archives, and VirusTotal authentication errors are listed instead of that clean line, and they are included in the Desktop report. Threats are written to the Desktop as `Aegis_Threat_Report_YYYYMMDD_HHMMSS.html` and/or `.rtf`.
 
 ## Windows context menu
 
@@ -164,7 +164,7 @@ python3 test_apis.py
 ## Workflow
 
 1. Accept a folder or archive (CLI path or GUI picker).
-2. Extract archives to `%TEMP%\threat_scan_workspace`.
+2. Extract archives to a unique temp directory.
 3. Collect matching payload files and compute SHA-256.
 4. Query VirusTotal v3 `/api/v3/files/{hash}`. If the hash is unknown and `vt_auto_upload` is on, upload the sample, wait for analysis, then pull sandbox behaviour.
 5. Query Hybrid Analysis (form-encoded `hash=`) and/or MetaDefender.

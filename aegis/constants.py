@@ -8,6 +8,7 @@ REPORT_TITLE = "AEGIS THREAT ANALYSIS REPORT"
 CONTEXT_MENU_LABEL = "Scan Payload with ThreatScanner"
 CONTEXT_MENU_KEY = "ThreatScanner"
 WORKSPACE_DIRNAME = "threat_scan_workspace"
+CHECKPOINT_FILENAME = "scan_checkpoint.json"
 USER_AGENT = f"AegisThreatScanner/{APP_VERSION}"
 HYBRID_USER_AGENT = "Falcon Sandbox"
 GEMINI_PRIMARY_MODEL = "gemini-3.7-flash"
@@ -55,6 +56,10 @@ ARCHIVE_EXTENSIONS: frozenset[str] = frozenset({".zip", ".rar", ".7z"})
 TAR_GZ_SUFFIXES: tuple[str, ...] = (".tar.gz", ".tgz")
 
 MAX_ARCHIVE_DEPTH = 4
+# Stop a hostile archive before it fills the disk. The cap is for one scan,
+# including nested archives, and counts uncompressed bytes actually written.
+MAX_EXTRACT_FILES = 8000
+MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
 
 # Preferred AV vendors to surface first in the report breakdown.
 PRIORITY_VENDORS: tuple[str, ...] = (

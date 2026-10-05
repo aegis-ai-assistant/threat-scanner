@@ -38,23 +38,51 @@ def write_reports(
     evaluated: int,
     threats: list[ThreatRecord],
     formats: str,
+    issues: list[str] | None = None,
 ) -> list[Path]:
+    issue_list = list(issues or [])
     stamp = scanned_at.strftime("%Y%m%d_%H%M%S")
     out_dir = desktop_dir()
     written: list[Path] = []
     if formats in {"html", "both"}:
         html_path = out_dir / f"Aegis_Threat_Report_{stamp}.html"
-        html_path.write_text(render_html(target, scanned_at, evaluated, threats), encoding="utf-8")
+        html_path.write_text(
+            render_html(target, scanned_at, evaluated, threats, issue_list),
+            encoding="utf-8",
+        )
         written.append(html_path)
     if formats in {"rtf", "both"}:
         rtf_path = out_dir / f"Aegis_Threat_Report_{stamp}.rtf"
-        rtf_path.write_text(render_rtf(target, scanned_at, evaluated, threats), encoding="utf-8")
+        rtf_path.write_text(
+            render_rtf(target, scanned_at, evaluated, threats, issue_list),
+            encoding="utf-8",
+        )
         written.append(rtf_path)
     return written
 
 
-def render_html(target: Path, scanned_at: datetime, evaluated: int, threats: list[ThreatRecord]) -> str:
+def render_html(
+    target: Path,
+    scanned_at: datetime,
+    evaluated: int,
+    threats: list[ThreatRecord],
+    issues: list[str] | None = None,
+) -> str:
+    issue_list = list(issues or [])
     cards = "\n".join(_html_card(item) for item in threats)
+    issue_block = _html_issues(issue_list)
+    if issue_list and not threats:
+        summary = (
+            f"Scan incomplete. {len(issue_list)} item"
+            f"{'' if len(issue_list) == 1 else 's'} could not be fully checked."
+        )
+    else:
+        summary = f"{len(threats)} threat{'s' if len(threats) != 1 else ''} detected"
+        if issue_list:
+            summary += (
+                f". {len(issue_list)} item"
+                f"{'' if len(issue_list) == 1 else 's'} could not be fully checked."
+            )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -160,6 +188,22 @@ def render_html(target: Path, scanned_at: datetime, evaluated: int, threats: lis
     .gamer strong {{
       color: #facc15;
     }}
+    .issues {{
+      margin-top: 18px;
+      border: 1px solid #854d0e;
+      background: #1c1917;
+      border-radius: 10px;
+      padding: 16px 18px;
+    }}
+    .issues h2 {{
+      margin: 0 0 8px;
+      color: #fde047;
+      font-size: 0.95rem;
+      letter-spacing: 0.06em;
+    }}
+    .issues li {{
+      margin: 4px 0;
+    }}
   </style>
 </head>
 <body>
@@ -169,9 +213,10 @@ def render_html(target: Path, scanned_at: datetime, evaluated: int, threats: lis
       <div class="meta">Target Archive/Path: <strong>{html.escape(str(target))}</strong></div>
       <div class="meta">Scan Time: <strong>{html.escape(scanned_at.strftime("%Y-%m-%d %H:%M:%S"))}</strong></div>
       <div class="meta">Engine: {html.escape(APP_NAME)} &middot; Evaluated execution files: {evaluated}</div>
-      <div class="summary">{len(threats)} threat{"s" if len(threats) != 1 else ""} detected</div>
+      <div class="summary">{html.escape(summary)}</div>
     </header>
     {cards}
+    {issue_block}
     <footer>Hash lookup, optional VirusTotal upload/sandbox, and Google AI synthesis. Clean/undetected files are omitted. Not a substitute for a full antivirus engine.</footer>
   </div>
 </body>
@@ -280,13 +325,46 @@ def _html_ai(intel: FileIntel) -> str:
     return "".join(blocks)
 
 
-def render_rtf(target: Path, scanned_at: datetime, evaluated: int, threats: list[ThreatRecord]) -> str:
+def _html_issues(issues: list[str]) -> str:
+    if not issues:
+        return ""
+    items = "".join(f"<li>{html.escape(item)}</li>" for item in issues)
+    return (
+        '<section class="issues"><h2>Could not fully check</h2>'
+        f"<ul>{items}</ul></section>"
+    )
+
+
+def render_rtf(
+    target: Path,
+    scanned_at: datetime,
+    evaluated: int,
+    threats: list[ThreatRecord],
+    issues: list[str] | None = None,
+) -> str:
+    issue_list = list(issues or [])
     body = [_rtf_escape("=" * 80), r"\par "]
     body.append(_rtf_escape(REPORT_TITLE) + r"\par ")
     body.append(_rtf_escape(f"Target Archive/Path: {target}") + r"\par ")
     body.append(_rtf_escape(f"Scan Time: {scanned_at.strftime('%Y-%m-%d %H:%M:%S')}") + r"\par ")
     body.append(_rtf_escape(f"Evaluated execution files: {evaluated}") + r"\par ")
+    if issue_list and not threats:
+        body.append(
+            _rtf_escape(
+                f"Scan incomplete. {len(issue_list)} item(s) could not be fully checked."
+            )
+            + r"\par "
+        )
+    elif issue_list:
+        body.append(
+            _rtf_escape(f"{len(issue_list)} item(s) could not be fully checked.") + r"\par "
+        )
     body.append(_rtf_escape("=" * 80) + r"\par\par ")
+    if issue_list:
+        body.append(r"\cf4\b Could not fully check\b0\cf0\par ")
+        for item in issue_list:
+            body.append(_rtf_escape(f" - {item}") + r"\par ")
+        body.append(r"\par ")
     for record in threats:
         body.append(_rtf_threat(record))
         body.append(_rtf_escape("-" * 80) + r"\par\par ")
