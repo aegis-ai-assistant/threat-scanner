@@ -30,15 +30,16 @@ class EngineResult:
 
 
 def classify_virustotal(intel: FileIntel) -> str:
-    """Classify one VirusTotal file report. Sandbox categories on that report count."""
+    """Classify one VirusTotal file report.
+
+    Zero malicious and suspicious counts are a clean hash. Sandbox notes that
+    arrived on that same report do not turn it into a threat.
+    """
     if intel.vt_error:
         return STATUS_API_ERROR
     if not intel.vt_found:
         return STATUS_UNKNOWN_HASH
     if intel.malicious > 0 or intel.suspicious > 0:
-        return VERDICT_MALICIOUS
-    sandbox = (intel.sandbox_verdict or "").lower()
-    if sandbox in {"malicious", "suspicious"}:
         return VERDICT_MALICIOUS
     return VERDICT_CLEAN
 

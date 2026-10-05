@@ -34,6 +34,7 @@ class FileIntel:
     metadefender_error: str | None = None
     vt_uploaded: bool = False
     vt_upload_error: str | None = None
+    hash_unseen: bool = False
     sandbox_verdict: str | None = None
     sandbox_family: str | None = None
     sandbox_tags: list[str] = field(default_factory=list)
@@ -57,7 +58,7 @@ class FileIntel:
         if result in {"infected", "suspicious", "malicious"}:
             return True
         sandbox = (self.sandbox_verdict or "").lower()
-        if sandbox in {"malicious", "suspicious"}:
+        if self.hash_unseen and sandbox in {"malicious", "suspicious"}:
             return True
         return False
 
@@ -82,9 +83,9 @@ class FileIntel:
         if self.suspicious > 0 or (self.hybrid_verdict or "").lower() == "suspicious":
             return "LOW"
         sandbox = (self.sandbox_verdict or "").lower()
-        if sandbox == "malicious":
+        if self.hash_unseen and sandbox == "malicious":
             return "MEDIUM"
-        if sandbox == "suspicious":
+        if self.hash_unseen and sandbox == "suspicious":
             return "LOW"
         if self.is_threat:
             return "MEDIUM"
@@ -136,6 +137,7 @@ class FileIntel:
             "metadefender_error": self.metadefender_error,
             "vt_uploaded": self.vt_uploaded,
             "vt_upload_error": self.vt_upload_error,
+            "hash_unseen": self.hash_unseen,
             "sandbox_verdict": self.sandbox_verdict,
             "sandbox_family": self.sandbox_family,
             "sandbox_tags": list(self.sandbox_tags),
@@ -188,6 +190,7 @@ class FileIntel:
         intel.metadefender_error = _optional_str(raw.get("metadefender_error"))
         intel.vt_uploaded = bool(raw.get("vt_uploaded"))
         intel.vt_upload_error = _optional_str(raw.get("vt_upload_error"))
+        intel.hash_unseen = bool(raw.get("hash_unseen"))
         intel.sandbox_verdict = _optional_str(raw.get("sandbox_verdict"))
         intel.sandbox_family = _optional_str(raw.get("sandbox_family"))
         intel.sandbox_tags = [str(item) for item in raw.get("sandbox_tags") or []]

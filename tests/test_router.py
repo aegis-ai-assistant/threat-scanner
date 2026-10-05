@@ -133,10 +133,60 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(calls, ["virustotal", "hybrid", "upload"])
         self.assertTrue(intel.vt_uploaded)
 
-    def test_upload_stays_off_by_default(self) -> None:
-        calls, intel = self._run(STATUS_UNKNOWN_HASH, STATUS_UNKNOWN_HASH)
+    def test_unseen_hash_is_sent_for_a_sandbox_test(self) -> None:
+        calls, intel = self._run(STATUS_UNKNOWN_HASH, STATUS_UNKNOWN_HASH, vt_auto_upload=False)
+        self.assertEqual(calls, ["virustotal", "hybrid", "upload"])
+        self.assertTrue(intel.hash_unseen)
+        self.assertTrue(intel.vt_uploaded)
+        self.assertFalse(intel.is_threat)
+
+    def test_upload_stays_off_when_sandbox_follow_up_is_off(self) -> None:
+        calls, intel = self._run(
+            STATUS_UNKNOWN_HASH,
+            STATUS_UNKNOWN_HASH,
+            vt_auto_upload=False,
+            vt_sandbox=False,
+        )
         self.assertEqual(calls, ["virustotal", "hybrid"])
         self.assertFalse(intel.vt_uploaded)
+        self.assertFalse(intel.hash_unseen)
+
+    def test_unseen_sandbox_virus_is_a_threat(self) -> None:
+        calls: list[str] = []
+
+        def fake_vt(sha256, api_key, limiter, log):
+            calls.append("virustotal")
+            return _vt(STATUS_UNKNOWN_HASH, sha256=sha256, vt_found=False)
+
+        def fake_hybrid(intel, api_key, limiter, log):
+            calls.append("hybrid")
+            return _hybrid(STATUS_UNKNOWN_HASH, intel)
+
+        def fake_enrich(intel, *args, **kwargs):
+            calls.append("upload")
+            intel.vt_uploaded = True
+            intel.vt_found = True
+            intel.hash_unseen = True
+            intel.sandbox_verdict = "malicious"
+            intel.sandbox_family = "MALWARE"
+            return intel
+
+        with (
+            patch("aegis.intel.router.query_virustotal", fake_vt),
+            patch("aegis.intel.router.query_hybrid_analysis", fake_hybrid),
+            patch("aegis.intel.router.enrich_virustotal", fake_enrich),
+        ):
+            intel = lookup_hash(
+                "c" * 64,
+                _config(vt_auto_upload=False, vt_sandbox=True),
+                RateLimiter(0, enabled=False),
+                lambda _line: None,
+                file_path=Path("sample.exe"),
+            )
+        self.assertEqual(calls, ["virustotal", "hybrid", "upload"])
+        self.assertTrue(intel.hash_unseen)
+        self.assertTrue(intel.is_threat)
+        self.assertEqual(intel.threat_level, "MEDIUM")
 
     def test_api_error_falls_back_and_blocks_upload_and_clean(self) -> None:
         calls, intel = self._run(
@@ -156,37 +206,43 @@ class RouterTests(unittest.TestCase):
         self.assertFalse(intel.is_threat)
         self.assertFalse(intel.vt_uploaded)
 
-    def test_sandbox_malicious_beats_a_clean_engine_count(self) -> None:
+    def test_zero_detections_skip_the_other_engine_and_stay_clean(self) -> None:
         calls: list[str] = []
 
         def fake_vt(sha256, api_key, limiter, log):
             calls.append("virustotal")
-            intel = FileIntel(sha256=sha256, vt_found=True, malicious=0, suspicious=0, sandbox_verdict="malicious")
-            return EngineResult(ENGINE_VIRUSTOTAL, VERDICT_MALICIOUS, intel)
+            intel = FileIntel(
+                sha256=sha256,
+                vt_found=True,
+                malicious=0,
+                suspicious=0,
+                undetected=71,
+                sandbox_verdict="malicious",
+            )
+            return EngineResult(ENGINE_VIRUSTOTAL, classify_virustotal(intel), intel)
 
         def fake_hybrid(*args, **kwargs):
             calls.append("hybrid")
             raise AssertionError("secondary engine should not run")
 
+        def fake_enrich(*args, **kwargs):
+            raise AssertionError("upload")
+
         with (
             patch("aegis.intel.router.query_virustotal", fake_vt),
             patch("aegis.intel.router.query_hybrid_analysis", fake_hybrid),
+            patch("aegis.intel.router.enrich_virustotal", fake_enrich),
         ):
             intel = lookup_hash(
                 "b" * 64,
-                _config(),
+                _config(vt_auto_upload=True),
                 RateLimiter(0, enabled=False),
                 lambda _line: None,
                 file_index=0,
             )
         self.assertEqual(calls, ["virustotal"])
-        self.assertTrue(intel.is_threat)
-        self.assertEqual(
-            classify_virustotal(
-                FileIntel(sha256="b" * 64, vt_found=True, malicious=0, suspicious=0, sandbox_verdict="malicious")
-            ),
-            VERDICT_MALICIOUS,
-        )
+        self.assertFalse(intel.is_threat)
+        self.assertEqual(classify_virustotal(intel), VERDICT_CLEAN)
 
 
 class ScanRoutingTests(unittest.TestCase):
@@ -227,9 +283,9 @@ class ScanRoutingTests(unittest.TestCase):
             result = run_scan(self.folder / "a.exe", _config(), lambda _line: None)
         self.assertIsNone(result.clean_message)
         self.assertNotIn("0 threats", result.dialog_text())
-        self.assertIn("HTTP 503", result.dialog_text())
+        self.assertIn("Unknown because of a service error", result.dialog_text())
         report = result.report_paths[0].read_text(encoding="utf-8")
-        self.assertIn("HTTP 503", report)
+        self.assertIn("Unknown because of a service error", report)
         self.assertIn("Scan incomplete", report)
 
 

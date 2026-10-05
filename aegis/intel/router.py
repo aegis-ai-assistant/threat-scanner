@@ -88,8 +88,12 @@ def lookup_hash(
     if intel.is_threat:
         return intel
 
-    if _eligible_for_upload(statuses, config) and config.vt_auto_upload and file_path is not None:
-        log("  Hash not found on every configured engine — uploading to VirusTotal.")
+    if _eligible_for_upload(statuses, config) and file_path is not None and _sandbox_follow_up(config):
+        intel.hash_unseen = True
+        log(
+            "  Hash not found on every configured engine. "
+            "The file has not been seen — submitting it for a sandbox test."
+        )
         try:
             intel = enrich_virustotal(
                 intel,
@@ -105,6 +109,8 @@ def lookup_hash(
             intel.vt_error = str(exc)
             log(f"  VirusTotal upload: {exc}")
             log("  Lookup incomplete — not treating this file as clean.")
+        else:
+            _log_sandbox_follow_up(intel, log)
     return intel
 
 
@@ -144,6 +150,24 @@ def _query_metadefender(intel: FileIntel, config: AppConfig, limiter: RateLimite
     return False
 
 
+def _sandbox_follow_up(config: AppConfig) -> bool:
+    """An unseen hash is submitted when sandbox follow-up or automatic upload is on."""
+    return config.vt_sandbox or config.vt_auto_upload
+
+
+def _log_sandbox_follow_up(intel: FileIntel, log) -> None:
+    verdict = (intel.sandbox_verdict or "").lower()
+    if verdict in {"malicious", "suspicious"}:
+        log(
+            f"  Sandbox follow-up: {intel.sandbox_verdict}. "
+            "The hash lookup had no record of this file."
+        )
+        return
+    if intel.vt_error or intel.vt_upload_error:
+        return
+    log("  Sandbox follow-up did not indicate a virus. The hash lookup had no record of this file.")
+
+
 def _eligible_for_upload(statuses: dict[str, str], config: AppConfig) -> bool:
     """Upload only after every configured hash engine reports a real hash miss."""
     if not statuses or STATUS_API_ERROR in statuses.values():
@@ -176,9 +200,8 @@ def _log_verdict(result: EngineResult, log) -> None:
 
 
 def _virustotal_threat(intel: FileIntel) -> bool:
-    if intel.malicious > 0 or intel.suspicious > 0:
-        return True
-    return (intel.sandbox_verdict or "").lower() in {"malicious", "suspicious"}
+    """Antivirus detections only. A sandbox tag on a zero-detection hash is not a threat."""
+    return intel.malicious > 0 or intel.suspicious > 0
 
 
 def _merge_virustotal(base: FileIntel, incoming: FileIntel) -> FileIntel:
@@ -191,6 +214,7 @@ def _merge_virustotal(base: FileIntel, incoming: FileIntel) -> FileIntel:
     incoming.metadefender_total = base.metadefender_total
     incoming.metadefender_result = base.metadefender_result
     incoming.metadefender_error = base.metadefender_error
+    incoming.hash_unseen = incoming.hash_unseen or base.hash_unseen
     for label in base.labels:
         incoming.add_label(label)
     existing = {(item.vendor.lower(), item.label.lower()) for item in incoming.vendors}

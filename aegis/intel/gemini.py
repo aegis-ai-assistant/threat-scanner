@@ -9,7 +9,6 @@ import requests
 
 from aegis.constants import GEMINI_FALLBACK_MODEL, GEMINI_GENERATE, GEMINI_PRIMARY_MODEL
 from aegis.intel import FileIntel
-from aegis.rate_limit import RateLimiter
 
 _SYSTEM_PROMPT = """You are a defensive malware analyst. Use only the supplied evidence.
 Do not provide exploit, cracking, piracy, or DRM-bypass instructions. You may say a file
@@ -40,7 +39,6 @@ def synthesize_threats(
     threats: list,
     api_key: str,
     model: str,
-    limiter: RateLimiter,
     log,
     on_record=None,
 ) -> None:
@@ -55,7 +53,6 @@ def synthesize_threats(
                 api_key,
                 _SYSTEM_PROMPT,
                 _evidence_block(record),
-                limiter=limiter,
                 log=log,
                 model=resolved,
             )
@@ -158,17 +155,17 @@ def generate_text(
     system_prompt: str,
     user_text: str,
     *,
-    limiter: RateLimiter | None = None,
     log=None,
     model: str | None = None,
     timeout: float = 60,
 ) -> str | None:
-    """Call Gemini 3.x generateContent. Primary 3.7-flash, fallback 3.6-flash."""
+    """Call Gemini generateContent. Primary 3.8-flash, fallback 3.7-flash.
+
+    Paid Gemini calls are not held to the free-tier pause used by the hash engines.
+    """
     models = _model_chain(model)
     last_error = None
     for index, candidate in enumerate(models):
-        if limiter:
-            limiter.wait(log)
         status, text, error = _generate_once(api_key, candidate, system_prompt, user_text, timeout)
         if text:
             return text
@@ -211,7 +208,7 @@ def _generate_once(
             "generationConfig": {
                 "maxOutputTokens": 2048,
                 "responseMimeType": "application/json",
-                "thinkingConfig": {"thinkingBudget": 0},
+                "thinkingConfig": {"thinkingLevel": "low"},
             },
         },
         {
@@ -272,7 +269,11 @@ def _evidence_block(record) -> str:
         f"undetected={intel.undetected} harmless={intel.harmless} engines={intel.engine_total}",
         f"Labels: {', '.join(intel.labels[:12]) or 'n/a'}",
     ]
-    if intel.vt_uploaded:
+    if intel.hash_unseen:
+        lines.append(
+            "Hash lookup: no record of this file. It had not been seen, so it was submitted for a sandbox test."
+        )
+    elif intel.vt_uploaded:
         lines.append("VirusTotal: sample was auto-uploaded because the hash was unknown.")
     if intel.hybrid_verdict:
         extra = f", score={intel.hybrid_score}" if intel.hybrid_score is not None else ""

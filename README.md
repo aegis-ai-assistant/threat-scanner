@@ -89,12 +89,12 @@ Edit `config.json` and add at least a VirusTotal API key.
 | `metadefender_api_key` | Optional | [MetaDefender Cloud](https://metadefender.opswat.com) |
 | `google_api_key` | Optional | [Google AI Studio](https://aistudio.google.com/apikey) Gemini key for threat synthesis |
 | `secondary_engine` | | `hybrid_analysis` (default), `metadefender`, `both`, or `none` |
-| `free_tier` | | `true` enforces a 15-second pause between API calls |
+| `free_tier` | | `true` gives VirusTotal and Hybrid Analysis separate 15-second pauses, each started when that service responds. Google AI is not paused. |
 | `request_delay_seconds` | | Delay used when `free_tier` is true (default `15`) |
-| `vt_auto_upload` | | Upload unknown hashes to VirusTotal (default `false`, 32 MB public limit) |
-| `vt_sandbox` | | Pull VirusTotal behaviour/sandbox summary (default `true`) |
+| `vt_auto_upload` | | Upload a file when every configured engine has no record of its hash (default `true`, 32 MB public limit). A hash that is already known and clean is not uploaded. |
+| `vt_sandbox` | | When a hash is missing from every configured engine, submit that file for a VirusTotal sandbox test (default `true`). A known hash with 0 detections is not sent. A sandbox result of malicious or suspicious is reported, with a note that the hash was not found. |
 | `vt_analysis_timeout_seconds` | | How long to wait after an upload (default `90`) |
-| `google_model` | | Gemini model id (default `gemini-3.7-flash`, fallback `gemini-3.6-flash`) |
+| `google_model` | | Gemini model id (default `gemini-3.8-flash`, fallback `gemini-3.7-flash`) |
 | `report_format` | | `html`, `rtf`, or `both` |
 | `open_report` | | Open the report after a threat is found |
 
@@ -118,7 +118,7 @@ If every hashed file is clean or unknown, and nothing failed, the tool prints:
 
 `Scan Complete: 0 threats detected across X evaluated execution files.`
 
-and does **not** write a report. Hash failures, skipped archives, and VirusTotal authentication errors are listed instead of that clean line, and they are included in the Desktop report. Threats are written to the Desktop as `Aegis_Threat_Report_YYYYMMDD_HHMMSS.html` and/or `.rtf`.
+and does **not** write a report. Hash failures and skipped archives are listed instead of that clean line. A file that could not be checked because of an authentication failure, rate limit, or network error is flagged as unknown for that reason, and those items are included in the Desktop report. Threats are written to the Desktop as `Aegis_Threat_Report_YYYYMMDD_HHMMSS.html` and/or `.rtf`.
 
 ## Windows context menu
 
@@ -164,11 +164,11 @@ python3 test_apis.py
 ## Workflow
 
 1. Accept a folder or archive (CLI path or GUI picker).
-2. Extract archives to a unique temp directory.
+2. Extract archives to a unique temp directory. If an archive is larger than the extraction cap, the scan asks before continuing. Ignore extracts it anyway. Stop keeps the cap. Symlink and path checks stay in place either way.
 3. Collect matching payload files and compute SHA-256.
-4. Alternate the first hash lookup between VirusTotal and Hybrid Analysis. A conclusive clean or malicious result stops there. A hash miss asks the other engine. Upload to VirusTotal only when every configured engine reports the hash as unknown and `vt_auto_upload` is on.
+4. Alternate the first hash lookup between VirusTotal and Hybrid Analysis. A conclusive clean or malicious result stops there. A hash miss asks the other engine. When every configured engine has no record of the hash, upload the file to VirusTotal for a sandbox test.
 5. An authentication failure, rate limit, server error, or network error is an incomplete lookup. It is not a clean result and it does not trigger an upload. MetaDefender still runs when it is configured and neither primary engine was conclusive.
-6. If `google_api_key` is set, synthesize a short defensive note for each threat.
+6. If `google_api_key` is set, synthesize a short defensive note for each threat. If that summary fails, the report is still written and opened, with "Google simplified explanation failed." in that section. Retry AI summary stays available.
 7. Drop clean/undetected hashes from the report.
 8. Write the Aegis HTML/RTF report for remaining threats.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-compile API checks for Hybrid Analysis and Google Gemini 3.7 Flash.
+"""Pre-compile API checks for Hybrid Analysis and Google Gemini 3.8 Flash.
 
 Usage:
     python3 test_apis.py

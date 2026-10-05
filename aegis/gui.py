@@ -29,8 +29,8 @@ class ScannerApp:
     def __init__(self, root: tk.Tk, initial_target: Path | None = None) -> None:
         self.root = root
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.minsize(780, 540)
-        self.root.geometry("920x620")
+        self.root.minsize(1560, 1080)
+        self.root.geometry("1840x1240")
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._busy = False
         self._eta_anchor = 0.0
@@ -280,7 +280,14 @@ class ScannerApp:
             return
 
         def work(log, progress) -> ScanResult:
-            return run_scan(target, config, log, progress=progress, resume=resume)
+            return run_scan(
+                target,
+                config,
+                log,
+                progress=progress,
+                resume=resume,
+                on_extract_limit=self._confirm_extract_limit,
+            )
 
         self._begin_worker("Scanning…", work, config)
 
@@ -311,6 +318,19 @@ class ScannerApp:
                 self._queue.put(("error", str(exc)))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _confirm_extract_limit(self, message: str) -> bool:
+        """Ask on the main thread. The scan worker blocks until the user chooses."""
+        done = threading.Event()
+        answer = {"ignore": False}
+
+        def show() -> None:
+            answer["ignore"] = ask_ignore_extract_limit(self.root, message)
+            done.set()
+
+        self.root.after(0, show)
+        done.wait()
+        return answer["ignore"]
 
     def _apply_progress(self, event: dict) -> None:
         total = int(event.get("total") or 0)
@@ -381,9 +401,12 @@ class ScannerApp:
         if result.ai_pending:
             self.status_var.set("File lookups finished. The plain-English summary did not complete.")
             self.bar_status_var.set("Waiting on the plain-English summary")
+            self._open_report(result, config)
             messagebox.showwarning(
                 APP_NAME,
-                "The plain-English summary did not complete.\n\nUse Retry AI summary to try again.",
+                "The plain-English summary did not complete.\n\n"
+                "The report is open, and that explanation is marked failed.\n\n"
+                "Use Retry AI summary to try again.",
             )
             return
         text = result.dialog_text()
@@ -393,14 +416,53 @@ class ScannerApp:
         if result.clean_message and not result.errors:
             messagebox.showinfo(APP_NAME, text)
             return
-        if result.report_paths:
-            self._append("Open the report from your Desktop, or click OK to open it now.")
-            if config.open_report:
-                try:
-                    open_file(result.report_paths[0])
-                except OSError:
-                    pass
+        self._open_report(result, config)
         messagebox.showwarning(APP_NAME, text)
+
+    def _open_report(self, result: ScanResult, config: AppConfig) -> None:
+        if not result.report_paths:
+            return
+        self._append("Open the report from your Desktop, or click OK to open it now.")
+        if config.open_report:
+            try:
+                open_file(result.report_paths[0])
+            except OSError:
+                pass
+
+
+def ask_ignore_extract_limit(parent: tk.Misc, message: str) -> bool:
+    """Return True when the user chooses Ignore and extraction should continue past the cap."""
+    dialog = tk.Toplevel(parent)
+    dialog.title(APP_NAME)
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+    choice = {"ignore": False}
+    frame = ttk.Frame(dialog, padding=16)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(
+        frame,
+        text=(
+            f"{message}\n\n"
+            "Ignore the cap and extract this archive anyway? "
+            "A large stored archive can use a lot of disk space."
+        ),
+        wraplength=460,
+        justify="left",
+    ).pack(anchor="w")
+    buttons = ttk.Frame(frame)
+    buttons.pack(anchor="e", pady=(16, 0))
+
+    def choose(ignore: bool) -> None:
+        choice["ignore"] = ignore
+        dialog.destroy()
+
+    ttk.Button(buttons, text="Ignore", command=lambda: choose(True)).pack(side="left", padx=(0, 8))
+    ttk.Button(buttons, text="Stop", command=lambda: choose(False)).pack(side="left")
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+    dialog.grab_set()
+    dialog.update_idletasks()
+    parent.wait_window(dialog)
+    return choice["ignore"]
 
 
 def ask_continue_or_restart(

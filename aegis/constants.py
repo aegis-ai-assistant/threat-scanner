@@ -11,8 +11,8 @@ WORKSPACE_DIRNAME = "threat_scan_workspace"
 CHECKPOINT_FILENAME = "scan_checkpoint.json"
 USER_AGENT = f"AegisThreatScanner/{APP_VERSION}"
 HYBRID_USER_AGENT = "Falcon Sandbox"
-GEMINI_PRIMARY_MODEL = "gemini-3.7-flash"
-GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
+GEMINI_PRIMARY_MODEL = "gemini-3.8-flash"
+GEMINI_FALLBACK_MODEL = "gemini-3.7-flash"
 DEPRECATED_GEMINI_MODELS = frozenset(
     {
         "gemini-1.5-flash",

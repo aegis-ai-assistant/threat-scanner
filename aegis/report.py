@@ -236,7 +236,12 @@ def _html_card(record: ThreatRecord) -> str:
         for item in intel.vendors[:16]
     ) or "<li>No vendor labels returned</li>"
     extra_rows = ""
-    if intel.vt_uploaded:
+    if intel.hash_unseen:
+        extra_rows += (
+            "<dt>Hash lookup</dt><dd>No record of this file was found. "
+            "It had not been seen, so it was submitted for a sandbox test.</dd>"
+        )
+    elif intel.vt_uploaded:
         extra_rows += "<dt>VirusTotal Upload</dt><dd>Sample submitted because the hash was unknown</dd>"
     if intel.hybrid_verdict:
         score = f" (score {intel.hybrid_score})" if intel.hybrid_score is not None else ""
@@ -292,6 +297,9 @@ def _html_sandbox(intel: FileIntel) -> str:
     return f'<div class="sandbox"><h2>VirusTotal Sandbox</h2>{tag_line}<ul>{items}</ul></div>'
 
 
+_AI_EXPLANATION_FAILED = "Google simplified explanation failed."
+
+
 def _html_ai(intel: FileIntel) -> str:
     blocks: list[str] = []
     if intel.ai_synthesis:
@@ -317,10 +325,10 @@ def _html_ai(intel: FileIntel) -> str:
         blocks.append(
             f'<div class="gamer {tone}"><h2>Gamers\' Summary</h2>{"".join(rows)}</div>'
         )
-    if not blocks and intel.ai_error:
-        return (
-            '<div class="ai"><h2>Google AI Threat Synthesis</h2>'
-            f"Unavailable: {html.escape(intel.ai_error)}</div>"
+    elif intel.ai_error:
+        blocks.append(
+            '<div class="gamer warn"><h2>Gamers\' Summary</h2>'
+            f"<p>{html.escape(_AI_EXPLANATION_FAILED)}</p></div>"
         )
     return "".join(blocks)
 
@@ -397,7 +405,15 @@ def _rtf_threat(record: ThreatRecord) -> str:
         + r"\par ",
         _rtf_escape(f"Primary Labels:  {labels}") + r"\par ",
     ]
-    if intel.vt_uploaded:
+    if intel.hash_unseen:
+        lines.append(
+            _rtf_escape(
+                "Hash lookup: no record of this file was found. "
+                "It had not been seen, so it was submitted for a sandbox test."
+            )
+            + r"\par "
+        )
+    elif intel.vt_uploaded:
         lines.append(_rtf_escape("VirusTotal Upload: sample submitted (hash was unknown)") + r"\par ")
     if intel.hybrid_verdict:
         extra = f" (score {intel.hybrid_score})" if intel.hybrid_score is not None else ""
@@ -424,6 +440,9 @@ def _rtf_threat(record: ThreatRecord) -> str:
             lines.append(_rtf_escape(f" Why did the antivirus flag it? {intel.ai_plain_why}") + r"\par ")
         if intel.ai_plain_bottom:
             lines.append(_rtf_escape(f" Bottom Line Safety Call: {intel.ai_plain_bottom}") + r"\par ")
+    elif intel.ai_error:
+        lines.append(_rtf_escape("Gamers' Summary (In Plain English):") + r"\par ")
+        lines.append(_rtf_escape(f" {_AI_EXPLANATION_FAILED}") + r"\par ")
     lines.append(_rtf_escape("Vendor Breakdown:") + r"\par ")
     if intel.vendors:
         for item in intel.vendors[:16]:

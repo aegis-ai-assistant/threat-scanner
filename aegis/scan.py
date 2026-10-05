@@ -84,7 +84,15 @@ class ScanResult:
         return "\n".join(lines)
 
 
-def run_scan(target: Path, config: AppConfig, log, progress=None, *, resume: bool = False) -> ScanResult:
+def run_scan(
+    target: Path,
+    config: AppConfig,
+    log,
+    progress=None,
+    *,
+    resume: bool = False,
+    on_extract_limit=None,
+) -> ScanResult:
     resolved = target.expanduser().resolve()
     if not resolved.exists():
         raise FileNotFoundError(f"Path not found: {resolved}")
@@ -106,7 +114,13 @@ def run_scan(target: Path, config: AppConfig, log, progress=None, *, resume: boo
     workspace = prepare_workspace()
     try:
         log(f"Aegis Threat Scanner — target: {resolved}")
-        payloads = _collect_payloads(resolved, workspace, log, checkpoint)
+        payloads = _collect_payloads(
+            resolved,
+            workspace,
+            log,
+            checkpoint,
+            on_extract_limit=on_extract_limit,
+        )
         return _scan_payloads(resolved, payloads, config, log, checkpoint, progress)
     except ArchiveError as exc:
         checkpoint.stopped_reason = str(exc)
@@ -141,21 +155,7 @@ def complete_saved_ai(config: AppConfig, log, checkpoint: ScanCheckpoint | None 
     log(f"File lookups for {target} are already saved.")
     if _summarize(saved, threats, config, log):
         return _publish(target, saved, threats, config, log)
-
-    saved.phase = PHASE_AI
-    saved.stopped_reason = "The plain-English summary did not complete."
-    saved.save()
-    log("Plain-English summary did not complete. Use Retry AI summary to try again.")
-    return ScanResult(
-        target,
-        saved.payload_count,
-        threats,
-        [],
-        None,
-        scanned_at,
-        list(saved.errors),
-        ai_pending=True,
-    )
+    return _publish_with_failed_summary(target, saved, threats, config, log)
 
 
 def _note_issues(checkpoint: ScanCheckpoint, messages: list[str]) -> None:
@@ -166,6 +166,30 @@ def _note_issues(checkpoint: ScanCheckpoint, messages: list[str]) -> None:
             changed = True
     if changed:
         checkpoint.save()
+
+
+def unknown_because(message: str) -> str:
+    """Turn an API failure into the report flag for that file."""
+    labels: list[str] = []
+    for part in message.split(";"):
+        label = _unknown_reason(part)
+        if label not in labels:
+            labels.append(label)
+    return "; ".join(labels)
+
+
+def _unknown_reason(message: str) -> str:
+    text = message.lower()
+    if any(token in text for token in ("authentication", "unauthorized", "forbidden", "http 401", "http 403")):
+        return "Unknown because of authentication failure"
+    if any(token in text for token in ("429", "rate-limit", "rate limit", "rate limited")):
+        return "Unknown because of rate limit"
+    if any(
+        token in text
+        for token in ("request failed", "network", "timed out", "timeout", "connection", "name resolution")
+    ):
+        return "Unknown because of network error"
+    return "Unknown because of a service error"
 
 
 def _set_file_issue(checkpoint: ScanCheckpoint, internal_path: str, issue: str | None) -> None:
@@ -181,13 +205,22 @@ def _collect_payloads(
     workspace: Path,
     log,
     checkpoint: ScanCheckpoint,
+    on_extract_limit=None,
 ) -> list[PayloadFile]:
     budget = ExtractBudget()
+
+    def allow_limit(message: str) -> bool:
+        log(f"  {message}")
+        if on_extract_limit is None or not on_extract_limit(message):
+            return False
+        log("  Extraction cap ignored. Extracting this archive anyway.")
+        return True
+
     if resolved.is_file() and is_archive(resolved):
         extract_root = workspace / "root"
         log("Extracting archive to workspace...")
-        extract_archive(resolved, extract_root, budget)
-        _note_issues(checkpoint, extract_nested(extract_root, log, budget=budget))
+        extract_archive(resolved, extract_root, budget, on_limit=allow_limit)
+        _note_issues(checkpoint, extract_nested(extract_root, log, budget=budget, on_limit=allow_limit))
         return find_payloads(extract_root, path_prefix=resolved.name)
 
     if resolved.is_file():
@@ -217,8 +250,8 @@ def _collect_payloads(
         dest = workspace / "nested" / f"{index}_{archive.name}"
         try:
             log(f"  Extracting {archive.name}")
-            extract_archive(archive, dest, budget)
-            _note_issues(checkpoint, extract_nested(dest, log, budget=budget))
+            extract_archive(archive, dest, budget, on_limit=allow_limit)
+            _note_issues(checkpoint, extract_nested(dest, log, budget=budget, on_limit=allow_limit))
             relative = archive.relative_to(resolved).as_posix()
             prefix = f"{resolved.name}/{relative}"
             payloads.extend(find_payloads(dest, path_prefix=prefix))
@@ -299,12 +332,13 @@ def _scan_payloads(
                     checkpoint.payload_count,
                 ) from exc
             checkpoint.remember_file(payload, intel)
-            _set_file_issue(checkpoint, payload.internal_path, intel.service_error)
+            issue = unknown_because(intel.service_error) if intel.service_error else None
+            _set_file_issue(checkpoint, payload.internal_path, issue)
             checkpoint.save()
             saved = checkpoint.files[sha]
             intel = saved.intel
         if intel.service_error:
-            log(f"  Incomplete: {intel.service_error}")
+            log(f"  {unknown_because(intel.service_error)}")
         if intel.is_threat:
             threats.append(ThreatRecord(payload, intel))
             log(
@@ -319,20 +353,7 @@ def _scan_payloads(
         checkpoint.phase = PHASE_AI
         checkpoint.save()
         if not _summarize(checkpoint, threats, config, log):
-            checkpoint.phase = PHASE_AI
-            checkpoint.stopped_reason = "The plain-English summary did not complete."
-            checkpoint.save()
-            log("Plain-English summary did not complete. Use Retry AI summary to try again.")
-            return ScanResult(
-                target,
-                len(payloads),
-                threats,
-                [],
-                None,
-                scanned_at,
-                list(checkpoint.errors),
-                ai_pending=True,
-            )
+            return _publish_with_failed_summary(target, checkpoint, threats, config, log)
 
     return _publish(target, checkpoint, threats, config, log)
 
@@ -346,8 +367,6 @@ def _summarize(checkpoint: ScanCheckpoint, threats: list[ThreatRecord], config: 
         return True
     from aegis.intel.gemini import synthesize_threats
 
-    limiter = RateLimiter(config.request_delay_seconds, enabled=config.free_tier)
-
     def remember(record: ThreatRecord) -> None:
         checkpoint.update_intel(record.intel)
         checkpoint.phase = PHASE_AI
@@ -357,11 +376,47 @@ def _summarize(checkpoint: ScanCheckpoint, threats: list[ThreatRecord], config: 
         pending,
         config.google_api_key,
         config.google_model,
-        limiter,
         log,
         on_record=remember,
     )
     return all(record.intel.ai_summary_ready for record in threats)
+
+
+def _publish_with_failed_summary(
+    target: Path,
+    checkpoint: ScanCheckpoint,
+    threats: list[ThreatRecord],
+    config: AppConfig,
+    log,
+) -> ScanResult:
+    """Write the report with the explanation marked failed, and keep Retry available."""
+    checkpoint.phase = PHASE_AI
+    checkpoint.stopped_reason = "The plain-English summary did not complete."
+    checkpoint.save()
+    log(
+        "Plain-English summary did not complete. "
+        "The report marks that explanation as failed. Use Retry AI summary to try again."
+    )
+    reports = write_reports(
+        target,
+        checkpoint.scanned_at_dt(),
+        checkpoint.payload_count,
+        threats,
+        config.report_format,
+        list(checkpoint.errors),
+    )
+    for path in reports:
+        log(f"Report saved: {path}")
+    return ScanResult(
+        target,
+        checkpoint.payload_count,
+        threats,
+        reports,
+        None,
+        checkpoint.scanned_at_dt(),
+        list(checkpoint.errors),
+        ai_pending=True,
+    )
 
 
 def _publish(

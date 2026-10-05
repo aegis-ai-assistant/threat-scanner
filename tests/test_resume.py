@@ -154,13 +154,13 @@ class ResumeTests(unittest.TestCase):
             lookups.append(sha)
             return FileIntel(sha256=sha, vt_found=True, malicious=8, suspicious=1)
 
-        def fake_fail(threats, api_key, model, limiter, log, on_record=None):
+        def fake_fail(threats, api_key, model, log, on_record=None):
             for record in threats:
                 record.intel.ai_error = "offline"
                 if on_record:
                     on_record(record)
 
-        def fake_ok(threats, api_key, model, limiter, log, on_record=None):
+        def fake_ok(threats, api_key, model, log, on_record=None):
             for record in threats:
                 record.intel.ai_synthesis = "Flagged by several engines."
                 record.intel.ai_plain_what = "This file looks dangerous."
@@ -183,7 +183,9 @@ class ResumeTests(unittest.TestCase):
         ):
             first = run_scan(single, config, lambda _line: None)
         self.assertTrue(first.ai_pending)
-        self.assertEqual(first.report_paths, [])
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(first.report_paths), 1)
+        self.assertEqual(first.threats[0].intel.ai_error, "offline")
         saved = load_checkpoint()
         self.assertIsNotNone(saved)
         assert saved is not None
@@ -198,7 +200,7 @@ class ResumeTests(unittest.TestCase):
             second = complete_saved_ai(config, lambda _line: None)
 
         self.assertFalse(second.ai_pending)
-        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(reports), 2)
         self.assertEqual(len(lookups), 1)
         self.assertTrue(second.threats[0].intel.ai_summary_ready)
         self.assertIsNone(load_checkpoint())

@@ -18,7 +18,7 @@ from aegis.constants import HYBRID_OVERVIEW, HYBRID_SEARCH_HASH, HYBRID_USER_AGE
 from aegis.intel import FileIntel
 from aegis.intel.outcome import ENGINE_HYBRID, EngineResult, classify_hybrid
 from aegis.intel.transport import LookupInterrupted, incomplete_response, network_failure
-from aegis.rate_limit import RateLimiter
+from aegis.rate_limit import SERVICE_HYBRID, RateLimiter
 
 NOT_FOUND_MESSAGE = "[Hybrid Analysis: Hash not found in database]"
 
@@ -43,17 +43,17 @@ def _fill_hybrid(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> N
         log(f"  {NOT_FOUND_MESSAGE}")
         return
 
-    limiter.wait(log)
     try:
-        response = search_hash(api_key, sha256_hash)
+        with limiter.guard(SERVICE_HYBRID, log):
+            response = search_hash(api_key, sha256_hash)
     except requests.RequestException as exc:
         raise network_failure("Hybrid Analysis", exc) from exc
 
     if response.status_code == 429:
         log("  Hybrid Analysis rate-limited (HTTP 429). Waiting and retrying once...")
-        limiter.wait(log)
         try:
-            response = search_hash(api_key, sha256_hash)
+            with limiter.guard(SERVICE_HYBRID, log):
+                response = search_hash(api_key, sha256_hash)
         except requests.RequestException as exc:
             raise network_failure("Hybrid Analysis", exc) from exc
 

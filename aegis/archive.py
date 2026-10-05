@@ -26,6 +26,10 @@ class ArchiveError(RuntimeError):
     pass
 
 
+class ExtractLimitError(ArchiveError):
+    """The byte or file-count cap stopped extraction. The user may choose to ignore it."""
+
+
 @dataclass
 class ExtractBudget:
     """Shared cap for one scan, including nested archives."""
@@ -34,26 +38,27 @@ class ExtractBudget:
     max_bytes: int = MAX_EXTRACT_BYTES
     files: int = 0
     bytes_written: int = 0
+    limits_waived: bool = False
 
     def claim_file(self) -> None:
-        if self.files >= self.max_files:
-            raise ArchiveError(f"Extraction stopped: more than {self.max_files} files.")
+        if not self.limits_waived and self.files >= self.max_files:
+            raise ExtractLimitError(f"Extraction stopped: more than {self.max_files} files.")
         self.files += 1
 
     def claim_bytes(self, count: int) -> None:
         if count <= 0:
             return
-        if self.bytes_written + count > self.max_bytes:
-            raise ArchiveError(
+        if not self.limits_waived and self.bytes_written + count > self.max_bytes:
+            raise ExtractLimitError(
                 f"Extraction stopped: uncompressed data exceeds {self.max_bytes} bytes."
             )
         self.bytes_written += count
 
     def reject_declared(self, declared: int | None) -> None:
-        if declared is None or declared <= 0:
+        if self.limits_waived or declared is None or declared <= 0:
             return
         if self.bytes_written + declared > self.max_bytes:
-            raise ArchiveError(
+            raise ExtractLimitError(
                 f"Extraction stopped: a member declares {declared} uncompressed bytes, "
                 f"over the {self.max_bytes} byte limit."
             )
@@ -89,7 +94,12 @@ def _safe_target(base: Path, member: str) -> Path:
     return target
 
 
-def extract_archive(archive_path: Path, dest: Path, budget: ExtractBudget | None = None) -> None:
+def extract_archive(
+    archive_path: Path,
+    dest: Path,
+    budget: ExtractBudget | None = None,
+    on_limit=None,
+) -> None:
     if archive_path.is_symlink():
         raise ArchiveError(f"Refusing symlink archive: {archive_path.name}")
     budget = budget or ExtractBudget()
@@ -98,18 +108,27 @@ def extract_archive(archive_path: Path, dest: Path, budget: ExtractBudget | None
     if kind is None:
         raise ArchiveError(f"Unsupported archive type: {archive_path}")
     try:
-        if kind == "zip":
-            _extract_zip(archive_path, dest, budget)
-        elif kind == "7z":
-            _extract_7z(archive_path, dest, budget)
-        elif kind == "rar":
-            _extract_rar(archive_path, dest, budget)
-        elif kind == "tar.gz":
-            _extract_tar_gz(archive_path, dest, budget)
+        _extract_kind(kind, archive_path, dest, budget)
+    except ExtractLimitError as exc:
+        if budget.limits_waived or on_limit is None or not on_limit(str(exc)):
+            raise
+        budget.limits_waived = True
+        _extract_kind(kind, archive_path, dest, budget)
     except ArchiveError:
         raise
     except Exception as exc:
         raise ArchiveError(f"Failed to extract {archive_path.name}: {exc}") from exc
+
+
+def _extract_kind(kind: str, archive_path: Path, dest: Path, budget: ExtractBudget) -> None:
+    if kind == "zip":
+        _extract_zip(archive_path, dest, budget)
+    elif kind == "7z":
+        _extract_7z(archive_path, dest, budget)
+    elif kind == "rar":
+        _extract_rar(archive_path, dest, budget)
+    elif kind == "tar.gz":
+        _extract_tar_gz(archive_path, dest, budget)
 
 
 def find_archives(root: Path) -> list[Path]:
@@ -135,6 +154,7 @@ def extract_nested(
     log,
     depth: int = 0,
     budget: ExtractBudget | None = None,
+    on_limit=None,
 ) -> list[str]:
     """Extract nested archives under root. Returns messages for archives that were skipped."""
     budget = budget or ExtractBudget()
@@ -156,8 +176,8 @@ def extract_nested(
         out_dir = _nested_destination(archive)
         try:
             log(f"  Extracting nested archive: {archive.name}")
-            extract_archive(archive, out_dir, budget)
-            skipped.extend(extract_nested(out_dir, log, depth + 1, budget))
+            extract_archive(archive, out_dir, budget, on_limit=on_limit)
+            skipped.extend(extract_nested(out_dir, log, depth + 1, budget, on_limit=on_limit))
         except ArchiveError as exc:
             message = f"Skipped archive {archive.name}: {exc}"
             log(f"  Warning: {message}")
@@ -221,10 +241,10 @@ def _extract_7z(archive_path: Path, dest: Path, budget: ExtractBudget) -> None:
             _safe_target(dest, info.filename)
             planned_files += 1
             planned_bytes += max(0, int(info.uncompressed or 0))
-            if planned_files > budget.max_files:
-                raise ArchiveError(f"Extraction stopped: more than {budget.max_files} files.")
-            if planned_bytes > budget.max_bytes:
-                raise ArchiveError(
+            if not budget.limits_waived and planned_files > budget.max_files:
+                raise ExtractLimitError(f"Extraction stopped: more than {budget.max_files} files.")
+            if not budget.limits_waived and planned_bytes > budget.max_bytes:
+                raise ExtractLimitError(
                     f"Extraction stopped: uncompressed data exceeds {budget.max_bytes} bytes."
                 )
             files.append(info.filename)

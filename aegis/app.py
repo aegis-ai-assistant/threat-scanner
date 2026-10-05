@@ -95,7 +95,7 @@ def _run_cli(target: Path) -> int:
     if resume is None:
         return 0
     try:
-        result = run_scan(target, config, log=print, resume=resume)
+        result = run_scan(target, config, log=print, resume=resume, on_extract_limit=_cli_ignore_limit)
     except ScanPaused as exc:
         _emit(str(exc), error=True)
         return 3
@@ -105,8 +105,14 @@ def _run_cli(target: Path) -> int:
     if result.ai_pending:
         _emit(
             "The plain-English summary did not complete. "
+            "The report marks that explanation as failed. "
             "Run this scan again and choose to retry it."
         )
+        if config.open_report and result.report_paths:
+            try:
+                open_file(result.report_paths[0])
+            except OSError:
+                pass
         return 0
     if result.clean_message:
         return 0
@@ -150,6 +156,13 @@ def _cli_resume_choice(target: Path) -> bool | None:
         clear_checkpoint()
         return False
     return True
+
+
+def _cli_ignore_limit(message: str) -> bool:
+    _emit(message)
+    _emit("Ignoring the cap extracts the archive anyway and can use a lot of disk space.")
+    answer = _prompt("Ignore the extraction cap? [y/N] ")
+    return answer.lower().startswith("y")
 
 
 def _prompt(text: str) -> str:

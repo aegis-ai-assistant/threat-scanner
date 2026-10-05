@@ -22,7 +22,7 @@ from aegis.intel.outcome import (
     classify_virustotal,
 )
 from aegis.intel.transport import LookupInterrupted, incomplete_response, network_failure
-from aegis.rate_limit import RateLimiter
+from aegis.rate_limit import SERVICE_VIRUSTOTAL, RateLimiter
 
 _VT_HEADERS_ACCEPT = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 _ANALYSIS_POLL_SECONDS = 2
@@ -49,13 +49,13 @@ def query_virustotal(sha256: str, api_key: str, limiter: RateLimiter, log) -> En
 
 
 def _fetch_virustotal_report(sha256: str, api_key: str, limiter: RateLimiter, log) -> FileIntel:
-    limiter.wait(log)
-    response = _get_file(sha256, api_key)
+    with limiter.guard(SERVICE_VIRUSTOTAL, log):
+        response = _get_file(sha256, api_key)
 
     if response.status_code == 429:
         log("  VirusTotal rate-limited (HTTP 429). Waiting and retrying once...")
-        limiter.wait(log)
-        response = _get_file(sha256, api_key)
+        with limiter.guard(SERVICE_VIRUSTOTAL, log):
+            response = _get_file(sha256, api_key)
 
     if response.status_code == 404:
         return _empty(sha256, found=False)
@@ -93,8 +93,11 @@ def enrich_virustotal(
         return intel
     if not intel.vt_found and auto_upload and file_path is not None:
         intel = _upload_and_refresh(intel, file_path, api_key, limiter, log, analysis_timeout)
-    if intel.vt_found and sandbox:
+    follow_up = intel.hash_unseen
+    if intel.vt_found and sandbox and (_av_detections(intel) > 0 or follow_up):
         _attach_sandbox(intel, api_key, limiter, log)
+    elif intel.vt_found and sandbox:
+        log("  VirusTotal sandbox skipped: 0 detections across the engines.")
     return intel
 
 
@@ -103,6 +106,10 @@ def _get_file(sha256: str, api_key: str) -> requests.Response:
         return requests.get(f"{VT_API_FILE}{sha256}", headers=_headers(api_key), timeout=45)
     except requests.RequestException as exc:
         raise network_failure("VirusTotal", exc) from exc
+
+
+def _av_detections(intel: FileIntel) -> int:
+    return intel.malicious + intel.suspicious
 
 
 def _empty(sha256: str, found: bool) -> FileIntel:
@@ -129,15 +136,15 @@ def _upload_and_refresh(
         return intel
 
     log("  VirusTotal: hash unknown — uploading sample for analysis...")
-    limiter.wait(log)
     try:
-        with file_path.open("rb") as handle:
-            response = requests.post(
-                VT_API_FILE.rstrip("/"),
-                headers=_headers(api_key),
-                files={"file": (file_path.name, handle)},
-                timeout=120,
-            )
+        with limiter.guard(SERVICE_VIRUSTOTAL, log):
+            with file_path.open("rb") as handle:
+                response = requests.post(
+                    VT_API_FILE.rstrip("/"),
+                    headers=_headers(api_key),
+                    files={"file": (file_path.name, handle)},
+                    timeout=120,
+                )
     except requests.RequestException as exc:
         raise network_failure("VirusTotal upload", exc) from exc
 
@@ -148,15 +155,15 @@ def _upload_and_refresh(
 
     if response.status_code == 429:
         log("  VirusTotal upload rate-limited (HTTP 429). Waiting and retrying once...")
-        limiter.wait(log)
         try:
-            with file_path.open("rb") as handle:
-                response = requests.post(
-                    VT_API_FILE.rstrip("/"),
-                    headers=_headers(api_key),
-                    files={"file": (file_path.name, handle)},
-                    timeout=120,
-                )
+            with limiter.guard(SERVICE_VIRUSTOTAL, log):
+                with file_path.open("rb") as handle:
+                    response = requests.post(
+                        VT_API_FILE.rstrip("/"),
+                        headers=_headers(api_key),
+                        files={"file": (file_path.name, handle)},
+                        timeout=120,
+                    )
         except requests.RequestException as exc:
             raise network_failure("VirusTotal upload", exc) from exc
 
@@ -187,13 +194,13 @@ def _wait_for_analysis(
         return
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        limiter.wait(log)
         try:
-            response = requests.get(
-                f"{VT_API_ANALYSES}{analysis_id}",
-                headers=_headers(api_key),
-                timeout=45,
-            )
+            with limiter.guard(SERVICE_VIRUSTOTAL, log):
+                response = requests.get(
+                    f"{VT_API_ANALYSES}{analysis_id}",
+                    headers=_headers(api_key),
+                    timeout=45,
+                )
         except requests.RequestException as exc:
             raise network_failure("VirusTotal analysis", exc) from exc
         if response.status_code == 404:
@@ -215,10 +222,10 @@ def _wait_for_analysis(
 
 
 def _refresh_file_report(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> FileIntel:
-    limiter.wait(log)
-    refreshed = query_virustotal(intel.sha256, api_key, RateLimiter(0, enabled=False), log).intel
+    refreshed = query_virustotal(intel.sha256, api_key, limiter, log).intel
     refreshed.vt_uploaded = intel.vt_uploaded
     refreshed.vt_upload_error = intel.vt_upload_error
+    refreshed.hash_unseen = intel.hash_unseen
     if refreshed.vt_found:
         log(
             f"  VirusTotal (after upload): malicious={refreshed.malicious} "
@@ -230,10 +237,10 @@ def _refresh_file_report(intel: FileIntel, api_key: str, limiter: RateLimiter, l
 
 
 def _attach_sandbox(intel: FileIntel, api_key: str, limiter: RateLimiter, log) -> None:
-    limiter.wait(log)
     url = f"{VT_API_FILE}{intel.sha256}/behaviour_summary"
     try:
-        response = requests.get(url, headers=_headers(api_key), timeout=45)
+        with limiter.guard(SERVICE_VIRUSTOTAL, log):
+            response = requests.get(url, headers=_headers(api_key), timeout=45)
     except requests.RequestException as exc:
         raise network_failure("VirusTotal sandbox", exc) from exc
     if response.status_code == 404:
@@ -369,7 +376,7 @@ def parse_virustotal(sha256: str, payload: dict) -> FileIntel:
     intel.vendors = flagged
 
     sandbox_verdicts = attributes.get("sandbox_verdicts") or {}
-    if isinstance(sandbox_verdicts, dict):
+    if _av_detections(intel) > 0 and isinstance(sandbox_verdicts, dict):
         for name, detail in sandbox_verdicts.items():
             if not isinstance(detail, dict):
                 continue
